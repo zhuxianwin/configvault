@@ -1,9 +1,12 @@
 package sync
 
 import (
+	"context"
 	"fmt"
-	"log"
+	"io"
+	"os"
 
+	"github.com/configvault/internal/diff"
 	"github.com/configvault/internal/dotenv"
 	"github.com/configvault/internal/provider"
 )
@@ -13,63 +16,46 @@ type Syncer struct {
 	provider provider.Provider
 	writer   *dotenv.Writer
 	reader   *dotenv.Reader
-	outPath  string
+	output   io.Writer
 }
 
 // New creates a new Syncer.
-func New(p provider.Provider, outPath string) *Syncer {
+func New(p provider.Provider, w *dotenv.Writer, r *dotenv.Reader) *Syncer {
 	return &Syncer{
 		provider: p,
-		writer:   dotenv.NewWriter(outPath),
-		reader:   dotenv.NewReader(outPath),
-		outPath:  outPath,
+		writer:   w,
+		reader:   r,
+		output:   os.Stdout,
 	}
 }
 
-// SyncResult holds the outcome of a sync operation.
-type SyncResult struct {
-	Added   int
-	Updated int
-	Total   int
-}
-
-// Sync fetches secrets from the provider and merges them into the dotenv file.
-// Existing keys not present in the provider are preserved.
-func (s *Syncer) Sync() (*SyncResult, error) {
-	existing, err := s.reader.Read()
+// Sync fetches secrets and merges them into the target dotenv file.
+// It prints a diff summary of changes to the configured output.
+func (s *Syncer) Sync(ctx context.Context, path string) error {
+	secrets, err := s.provider.GetSecrets(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("reading existing dotenv: %w", err)
+		return fmt.Errorf("fetching secrets: %w", err)
 	}
 
-	fetched, err := s.provider.GetSecrets()
+	existing, err := s.reader.Read(path)
 	if err != nil {
-		return nil, fmt.Errorf("fetching secrets from %s: %w", s.provider.Name(), err)
+		return fmt.Errorf("reading existing dotenv: %w", err)
 	}
 
-	result := &SyncResult{}
+	changes := diff.Compute(existing, secrets)
+	diff.Fprint(s.output, changes, false)
+
 	merged := make(map[string]string, len(existing))
-
 	for k, v := range existing {
 		merged[k] = v
 	}
-
-	for k, v := range fetched {
-		if _, exists := existing[k]; !exists {
-			result.Added++
-		} else if existing[k] != v {
-			result.Updated++
-		}
+	for k, v := range secrets {
 		merged[k] = v
 	}
 
-	result.Total = len(merged)
-
-	if err := s.writer.Write(merged); err != nil {
-		return nil, fmt.Errorf("writing dotenv file: %w", err)
+	if err := s.writer.Write(path, merged); err != nil {
+		return fmt.Errorf("writing dotenv: %w", err)
 	}
 
-	log.Printf("[%s] sync complete: %d added, %d updated, %d total",
-		s.provider.Name(), result.Added, result.Updated, result.Total)
-
-	return result, nil
+	return nil
 }
