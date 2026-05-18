@@ -3,72 +3,86 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-// ProviderType represents the type of secrets provider.
-type ProviderType string
+// ProviderConfig holds provider-specific settings.
+type ProviderConfig struct {
+	Type string `yaml:"type"` // "vault" or "ssm"
 
-const (
-	ProviderVault ProviderType = "vault"
-	ProviderSSM   ProviderType = "ssm"
-)
+	// Vault options
+	Address string `yaml:"address,omitempty"`
+	Token   string `yaml:"token,omitempty"`
+	Path    string `yaml:"path,omitempty"`
 
-// Config holds the top-level configvault configuration.
+	// SSM options
+	Region    string `yaml:"region,omitempty"`
+	SSMPath   string `yaml:"ssm_path,omitempty"`
+	Decrypt   bool   `yaml:"decrypt,omitempty"`
+}
+
+// CacheConfig controls local caching behaviour.
+type CacheConfig struct {
+	Enabled bool          `yaml:"enabled"`
+	Dir     string        `yaml:"dir"`
+	TTL     time.Duration `yaml:"ttl"`
+}
+
+// Config is the top-level configvault configuration.
 type Config struct {
-	Provider ProviderType `yaml:"provider"`
-	Output   string       `yaml:"output"`
-	Vault    *VaultConfig `yaml:"vault,omitempty"`
-	SSM      *SSMConfig   `yaml:"ssm,omitempty"`
+	OutputFile string         `yaml:"output_file"`
+	Provider   ProviderConfig `yaml:"provider"`
+	Cache      CacheConfig    `yaml:"cache"`
 }
 
-// VaultConfig holds Vault-specific configuration.
-type VaultConfig struct {
-	Address string `yaml:"address"`
-	Token   string `yaml:"token"`
-	Path    string `yaml:"path"`
-}
-
-// SSMConfig holds AWS SSM-specific configuration.
-type SSMConfig struct {
-	Region  string `yaml:"region"`
-	Path    string `yaml:"path"`
-	Decrypt bool   `yaml:"decrypt"`
-}
-
-// Load reads and parses a YAML config file at the given path.
+// Load reads and validates a Config from the YAML file at path.
 func Load(path string) (*Config, error) {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("config: open %q: %w", path, err)
+		return nil, fmt.Errorf("config: read file: %w", err)
 	}
-	defer f.Close()
 
 	var cfg Config
-	if err := yaml.NewDecoder(f).Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("config: decode %q: %w", path, err)
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("config: parse yaml: %w", err)
 	}
 
-	if err := cfg.validate(); err != nil {
+	if err := validate(&cfg); err != nil {
 		return nil, err
+	}
+
+	if cfg.OutputFile == "" {
+		cfg.OutputFile = ".env"
+	}
+	if cfg.Cache.Dir == "" {
+		cfg.Cache.Dir = ".configvault-cache"
+	}
+	if cfg.Cache.TTL == 0 {
+		cfg.Cache.TTL = 5 * time.Minute
 	}
 
 	return &cfg, nil
 }
 
-func (c *Config) validate() error {
-	if c.Provider != ProviderVault && c.Provider != ProviderSSM {
-		return fmt.Errorf("config: unknown provider %q (must be \"vault\" or \"ssm\")", c.Provider)
-	}
-	if c.Output == "" {
-		return fmt.Errorf("config: output path must not be empty")
-	}
-	if c.Provider == ProviderVault && c.Vault == nil {
-		return fmt.Errorf("config: vault section required when provider is \"vault\"")
-	}
-	if c.Provider == ProviderSSM && c.SSM == nil {
-		return fmt.Errorf("config: ssm section required when provider is \"ssm\"")
+func validate(cfg *Config) error {
+	switch cfg.Provider.Type {
+	case "vault":
+		if cfg.Provider.Address == "" {
+			return fmt.Errorf("config: vault provider requires 'address'")
+		}
+		if cfg.Provider.Path == "" {
+			return fmt.Errorf("config: vault provider requires 'path'")
+		}
+	case "ssm":
+		if cfg.Provider.SSMPath == "" {
+			return fmt.Errorf("config: ssm provider requires 'ssm_path'")
+		}
+	case "":
+		return fmt.Errorf("config: 'provider.type' is required")
+	default:
+		return fmt.Errorf("config: unknown provider type %q", cfg.Provider.Type)
 	}
 	return nil
 }
