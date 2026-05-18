@@ -1,98 +1,84 @@
 package sync_test
 
 import (
+	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/configvault/internal/sync"
+	"github.com/example/configvault/internal/audit"
+	"github.com/example/configvault/internal/dotenv"
+	csync "github.com/example/configvault/internal/sync"
 )
 
-// mockProvider implements provider.Provider for testing.
 type mockProvider struct {
 	name    string
 	secrets map[string]string
 	err     error
 }
 
-func (m *mockProvider) GetSecrets() (map[string]string, error) {
+func (m *mockProvider) GetSecrets(_ context.Context) (map[string]string, error) {
 	return m.secrets, m.err
 }
-
-func (m *mockProvider) Name() string {
-	return m.name
-}
+func (m *mockProvider) Name() string { return m.name }
 
 func TestSyncer_Sync_WritesSecrets(t *testing.T) {
 	dir := t.TempDir()
-	outPath := filepath.Join(dir, ".env")
+	path := filepath.Join(dir, ".env")
 
-	p := &mockProvider{
-		name:    "mock",
-		secrets: map[string]string{"DB_HOST": "localhost", "DB_PORT": "5432"},
-	}
+	p := &mockProvider{name: "vault", secrets: map[string]string{"FOO": "bar", "BAZ": "qux"}}
+	s := csync.New(p, dotenv.NewReader(), dotenv.NewWriter(), &audit.NoopLogger{})
 
-	s := sync.New(p, outPath)
-	result, err := s.Sync()
+	d, err := s.Sync(context.Background(), path)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("Sync: %v", err)
+	}
+	if len(d.Added) != 2 {
+		t.Errorf("expected 2 added, got %d", len(d.Added))
 	}
 
-	if result.Added != 2 {
-		t.Errorf("expected 2 added, got %d", result.Added)
+	reader := dotenv.NewReader()
+	got, err := reader.Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
 	}
-	if result.Total != 2 {
-		t.Errorf("expected total 2, got %d", result.Total)
-	}
-
-	if _, err := os.Stat(outPath); os.IsNotExist(err) {
-		t.Error("expected dotenv file to be created")
+	if got["FOO"] != "bar" {
+		t.Errorf("FOO = %q, want bar", got["FOO"])
 	}
 }
 
 func TestSyncer_Sync_MergesWithExisting(t *testing.T) {
 	dir := t.TempDir()
-	outPath := filepath.Join(dir, ".env")
+	path := filepath.Join(dir, ".env")
 
-	// Write a pre-existing dotenv file.
-	if err := os.WriteFile(outPath, []byte("EXISTING_KEY=existing_value\nDB_HOST=old_host\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	w := dotenv.NewWriter()
+	_ = w.Write(path, map[string]string{"EXISTING": "value", "FOO": "old"})
 
-	p := &mockProvider{
-		name:    "mock",
-		secrets: map[string]string{"DB_HOST": "new_host", "API_KEY": "secret"},
-	}
+	p := &mockProvider{name: "ssm", secrets: map[string]string{"FOO": "new"}}
+	s := csync.New(p, dotenv.NewReader(), w, nil)
 
-	s := sync.New(p, outPath)
-	result, err := s.Sync()
+	_, err := s.Sync(context.Background(), path)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("Sync: %v", err)
 	}
 
-	if result.Added != 1 {
-		t.Errorf("expected 1 added, got %d", result.Added)
+	got, _ := dotenv.NewReader().Read(path)
+	if got["EXISTING"] != "value" {
+		t.Errorf("EXISTING = %q, want value", got["EXISTING"])
 	}
-	if result.Updated != 1 {
-		t.Errorf("expected 1 updated, got %d", result.Updated)
-	}
-	if result.Total != 3 {
-		t.Errorf("expected total 3, got %d", result.Total)
+	if got["FOO"] != "new" {
+		t.Errorf("FOO = %q, want new", got["FOO"])
 	}
 }
 
 func TestSyncer_Sync_ProviderError(t *testing.T) {
 	dir := t.TempDir()
-	outPath := filepath.Join(dir, ".env")
+	path := filepath.Join(dir, ".env")
 
-	p := &mockProvider{
-		name: "mock",
-		err:  errors.New("connection refused"),
-	}
+	p := &mockProvider{name: "vault", err: errors.New("connection refused")}
+	s := csync.New(p, dotenv.NewReader(), dotenv.NewWriter(), nil)
 
-	s := sync.New(p, outPath)
-	_, err := s.Sync()
+	_, err := s.Sync(context.Background(), path)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
