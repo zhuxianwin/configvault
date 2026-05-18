@@ -17,7 +17,7 @@ type ssmClient interface {
 
 // Provider retrieves secrets from AWS SSM Parameter Store.
 type Provider struct {
-	client ssmClient
+	client  ssmClient
 	decrypt bool
 }
 
@@ -31,11 +31,25 @@ func (p *Provider) Name() string {
 	return "aws-ssm"
 }
 
-// GetSecrets fetches all parameters under the given path prefix.
-func (p *Provider) GetSecrets(ctx context.Context, path string) (map[string]string, error) {
+// normalizePath ensures the path starts with a leading slash.
+func normalizePath(path string) string {
 	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
+		return "/" + path
 	}
+	return path
+}
+
+// paramNameToKey converts an SSM parameter name to an environment-variable-style key
+// by stripping the path prefix, uppercasing, and replacing hyphens with underscores.
+func paramNameToKey(name, pathPrefix string) string {
+	key := strings.TrimPrefix(name, pathPrefix+"/")
+	return strings.ToUpper(strings.ReplaceAll(key, "-", "_"))
+}
+
+// GetSecrets fetches all parameters under the given path prefix.
+// Parameters of type SecureString are skipped when decryption is disabled.
+func (p *Provider) GetSecrets(ctx context.Context, path string) (map[string]string, error) {
+	path = normalizePath(path)
 
 	secrets := make(map[string]string)
 	var nextToken *string
@@ -55,8 +69,7 @@ func (p *Provider) GetSecrets(ctx context.Context, path string) (map[string]stri
 			if param.Type == types.ParameterTypeSecureString && !p.decrypt {
 				continue
 			}
-			key := strings.TrimPrefix(aws.ToString(param.Name), path+"/")
-			key = strings.ToUpper(strings.ReplaceAll(key, "-", "_"))
+			key := paramNameToKey(aws.ToString(param.Name), path)
 			secrets[key] = aws.ToString(param.Value)
 		}
 
